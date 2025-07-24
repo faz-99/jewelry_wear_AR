@@ -8,6 +8,7 @@
 </template>
 
 <script>
+// TensorFlow and BodyPix will be available globally via CDN
 import { Hands } from '@mediapipe/hands';
 import { Camera } from '@mediapipe/camera_utils';
 
@@ -16,20 +17,53 @@ export default {
     return {
       ringImage: null,
       hands: null,
-      canvasCtx: null
+      canvasCtx: null,
+      net: null
     };
   },
   mounted() {
+    this.setupBodyPix();
     this.setupCamera();
     this.setupHands();
   },
   methods: {
+    async setupBodyPix() {
+      this.net = await window.bodyPix.load();
+    },
     uploadRing(e) {
       const file = e.target.files[0];
-      if (file) {
-        this.ringImage = new Image();
-        this.ringImage.src = URL.createObjectURL(file);
-      }
+      if (!file) return;
+
+      const img = new Image();
+      img.onload = async () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+
+        const segmentation = await this.net.segmentPerson(img, {
+          segmentationThreshold: 0.7,
+          internalResolution: 'medium'
+        });
+
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const pixels = imageData.data;
+
+        for (let i = 0; i < pixels.length; i += 4) {
+          if (segmentation.data[i / 4] === 0) {
+            pixels[i + 3] = 0; // make pixel transparent
+          }
+        }
+
+        ctx.putImageData(imageData, 0, 0);
+        const ringImg = new Image();
+        ringImg.onload = () => {
+          this.ringImage = ringImg;
+        };
+        ringImg.src = canvas.toDataURL();
+      };
+      img.src = URL.createObjectURL(file);
     },
     setupCamera() {
       const videoElement = this.$refs.video;
@@ -61,14 +95,21 @@ export default {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(this.$refs.video, 0, 0, canvas.width, canvas.height);
 
-      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+      if (results.multiHandLandmarks?.length > 0 && this.ringImage) {
         const landmarks = results.multiHandLandmarks[0];
-        const fingerTip = landmarks[12]; // middle finger tip 👆
-        
-        if (this.ringImage) {
-          const ringSize = 40;
-          ctx.drawImage(this.ringImage, fingerTip.x * canvas.width - ringSize / 2, fingerTip.y * canvas.height - ringSize / 2, ringSize, ringSize);
-        }
+        const joint = landmarks[10]; // finger joint
+        const tip = landmarks[12];   // fingertip for rotation
+
+        const angle = Math.atan2(tip.y - joint.y, tip.x - joint.x);
+        const x = joint.x * canvas.width;
+        const y = joint.y * canvas.height;
+        const ringSize = 40;
+
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(angle);
+        ctx.drawImage(this.ringImage, -ringSize / 2, -ringSize / 2, ringSize, ringSize);
+        ctx.restore();
       }
     }
   }
